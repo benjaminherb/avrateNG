@@ -66,7 +66,7 @@ def play(db, config, stimuli_idx):
     play a given media file by its index inside the playlist
     """
     stimuli_idx = int(stimuli_idx)
-    lInfo(f"play {stimuli_idx}")
+    lInfo(f"Play Stimuli {stimuli_idx}")
 
 
     user_id, playlist_idx = get_user_id_playlist(db, config)
@@ -98,13 +98,11 @@ def play(db, config, stimuli_idx):
 
     stimuli_file = " ".join(map(q, stimuli_file))
 
-    lInfo("play {}".format(stimuli_file))
+    lInfo(f"Play Stimuli: {stimuli_file}")
     if "gray_video" in config:
         stimuli_file = q(config["gray_video"]) + " " + stimuli_file + " " + q(config["gray_video"])
-        lInfo("use gray video before and after: {}".format(stimuli_file))
-    lInfo("player command")
-
-    lInfo(config["player"].format(filename=stimuli_file))
+        lInfo(f"Use gray video before and after: {stimuli_file}")
+    lInfo(f"Player Command: {config['player'].format(filename=stimuli_file)}")
     shell_call(config["player"].format(filename=stimuli_file))
 
 
@@ -148,14 +146,14 @@ def rating_already_exists(db, user_id, stimuli_idx):
     return count > 0
 
 
-def check_all_ratings_complete(db, user_id, current_stimuli_idx, playlist):
+def check_all_ratings_complete(db, user_id, current_stimuli_idx, playlist, playlist_idx):
     """
     checks if all previous were rated correctly
     """
     expected_files = set()
     for i in range(current_stimuli_idx+1):
-        if i < len(playlist):
-            expected_files.add(playlist[i])
+        if i < len(playlist_idx):
+            expected_files.add(str(playlist[playlist_idx[i]]))
     
     cursor = db.execute(
         'SELECT DISTINCT stimuli_file FROM ratings WHERE user_ID = ?',
@@ -174,7 +172,6 @@ def check_all_ratings_complete(db, user_id, current_stimuli_idx, playlist):
               f"Rated Files:\t{rated_files}")
     
     return all_ratings_complete
-
 
 
 @route('/')  # Welcome screen
@@ -205,8 +202,11 @@ def welcome(db, config):
 
 @route('/start_test')
 def start_test(config, db):
+    lInfo("\nSTARTING TEST")
     response.set_cookie("training", "0", path="/")
     response.set_cookie("training_state", "done", path="/")
+    response.set_cookie("stimuli_done", "0", path="/")
+    response.set_cookie("videos_shown", "[]", path="/") 
     return template(
         config["template_folder"] + "/start_test.tpl",
         title="AVRateNG"
@@ -216,7 +216,6 @@ def start_test(config, db):
 @route('/training/<stimuli_idx>')
 @route('/training/<stimuli_idx>', method="POST")
 def training(config, db, stimuli_idx):
-
     user_id = int(request.get_cookie("user_id"))
     stimuli_idx = int(stimuli_idx)
 
@@ -252,9 +251,17 @@ def rate(db, config, stimuli_idx):
     stimuli_done = int(request.get_cookie("stimuli_done"))
     
     if not stimuli_idx == stimuli_done or rating_already_exists(db, user_id, stimuli_idx):
-        stimuli_done = int(request.get_cookie("stimuli_done"))
-        if stimuli_done == stimuli_idx:
-            stimuli_done += 1
+        # find first rating that does not exist yet
+        next_stimuli = 0 
+        while next_stimuli < len(config["playlist"]) and rating_already_exists(db, user_id, next_stimuli):
+            next_stimuli += 1
+        
+        if next_stimuli >= len(config["playlist"]):
+            redirect('/finish')
+            return
+            
+        stimuli_done = next_stimuli
+        response.set_cookie("stimuli_done", str(stimuli_done), path="/")
         lWarn(f"Requested stimuli index {stimuli_idx} is unexpected or exists already, using stimuli_done {stimuli_done} instead.")
         redirect('/rate/' + str(stimuli_done))
 
@@ -355,7 +362,8 @@ def save_rating(db, config):
     stimuli_done = int(request.get_cookie("stimuli_done"))
     lInfo(f"Saved Rating (UID: {user_id} SID: {stimuli_ID} TS: {timestamp} Stimuli File: {stimuli_file} Stimuli Done (Prev): {stimuli_done}")
 
-    if check_all_ratings_complete(db, user_id, stimuli_done, [str(p) for p in config["playlist"]]):
+    user_id, playlist_idx = get_user_id_playlist(db, config)
+    if check_all_ratings_complete(db, user_id, stimuli_done, config["playlist"], playlist_idx):
         stimuli_done += 1
     else:
         lWarn(f"Not all previous ratings complete for user {user_id}, stimuli {stimuli_idx} (REPEATING STIMULI)")
@@ -445,14 +453,14 @@ def get_and_check_playlist(playlistfilename):
             normalized_video_path = os.path.join(*line.strip().split("/"))
             # check if each video exists
             if " | " in normalized_video_path:
-                lInfo("specified multiple videos per playlist entry")
+                lInfo("Specified multiple videos per playlist entry")
             videos = normalized_video_path.split(" | ")
             for video in videos:
                 if not os.path.isfile(video):
                     lError("'{}' is not a valid videofile, please check your playlistfile".format(normalized_video_path))
                     sys.exit(-1)
             playlist.append(videos)
-        lInfo("\n".join(map(str, playlist)))
+        lInfo(f"{os.path.basename(playlistfilename)}:\n" + '\n'.join(map(str, playlist)))
         return playlist
     return -1
 
