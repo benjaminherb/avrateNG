@@ -66,22 +66,36 @@ def play(db, config, stimuli_idx):
     play a given media file by its index inside the playlist
     """
     stimuli_idx = int(stimuli_idx)
-    print("play", stimuli_idx)
+    lInfo(f"play {stimuli_idx}")
+
 
     user_id, playlist_idx = get_user_id_playlist(db, config)
-    if int(request.get_cookie("training")):
+    training = int(request.get_cookie("training", "0"))
+    if training:
         stimuli_file = config["trainingsplaylist"][stimuli_idx]
     else:
         stimuli_file = config["playlist"][playlist_idx[stimuli_idx]]
 
-    print(stimuli_file)
     if config.get("no_media_playback", False):
+        return
+
+    videos_shown = json.loads(request.get_cookie("videos_shown", "[]"))
+
+    # used to avoid false positives from training/playback or duplicate videos in the playlist
+    video_identifier = f"U{user_id}_S{stimuli_idx}_{'train' if training else 'test'}" 
+    lInfo(f"Videos already shown: {videos_shown}")
+    if video_identifier in videos_shown:
+        lWarn(f"Video {stimuli_file} already shown, skipping playback.")
         return
 
     def q(x):
         """ quote the media name for command line usage,
         prevends problems with spaces in media filenames"""
         return "\"" + x + "\""
+
+    videos_shown.append(video_identifier)
+    response.set_cookie("videos_shown", json.dumps(videos_shown), path="/")
+
     stimuli_file = " ".join(map(q, stimuli_file))
 
     lInfo("play {}".format(stimuli_file))
@@ -89,7 +103,8 @@ def play(db, config, stimuli_idx):
         stimuli_file = q(config["gray_video"]) + " " + stimuli_file + " " + q(config["gray_video"])
         lInfo("use gray video before and after: {}".format(stimuli_file))
     lInfo("player command")
-    print(config["player"].format(filename=stimuli_file))
+
+    lInfo(config["player"].format(filename=stimuli_file))
     shell_call(config["player"].format(filename=stimuli_file))
 
 
@@ -121,6 +136,47 @@ def get_user_id_playlist(db, config):
     return user_id, playlist
 
 
+def rating_already_exists(db, user_id, stimuli_idx):
+    """
+    checks if a rating for the given user_id and stimuli_idx already exists
+    """
+    cursor = db.execute(
+        'SELECT COUNT(*) FROM ratings WHERE user_ID = ? AND stimuli_ID = ?',
+        (user_id, stimuli_idx)
+    )
+    count = cursor.fetchone()[0]
+    return count > 0
+
+
+def check_all_ratings_complete(db, user_id, current_stimuli_idx, playlist):
+    """
+    checks if all previous were rated correctly
+    """
+    expected_files = set()
+    for i in range(current_stimuli_idx+1):
+        if i < len(playlist):
+            expected_files.add(playlist[i])
+    
+    cursor = db.execute(
+        'SELECT DISTINCT stimuli_file FROM ratings WHERE user_ID = ?',
+        (user_id,)
+    )
+    rated_files = set(row[0] for row in cursor.fetchall())
+    all_ratings_complete = expected_files.issubset(rated_files)
+
+    if all_ratings_complete:
+        lInfo(f"All ratings complete for user {user_id} up to stimuli index {current_stimuli_idx}\n" +
+              f"Expected Files:\t{expected_files}\n" +
+              f"Rated Files:\t{rated_files}")
+    else:
+        lWarn(f"Not all ratings complete for user {user_id} up to stimuli index {current_stimuli_idx}\n" +
+              f"Expected Files:\t{expected_files}\n" +
+              f"Rated Files:\t{rated_files}")
+    
+    return all_ratings_complete
+
+
+
 @route('/')  # Welcome screen
 @auth_basic(check_credentials)
 def welcome(db, config):
@@ -130,11 +186,9 @@ def welcome(db, config):
     user_id, playlist = get_user_id_playlist(db, config)
 
     response.set_cookie("user_id", str(user_id), path="/")
-
-    # initialize session_state variable (throws error when refreshing the page or going back)
-    response.set_cookie("session_state", "0", path="/")
     response.set_cookie("stimuli_done", "0", path="/")
     response.set_cookie("training", "0", path="/")
+    response.set_cookie("videos_shown", "[]", path="/") # used to avoid showing the same video multiple times
 
     # check if training stage is wished and/or training has already finished:
     if config["trainingsplaylist"]: # check if training switch is toggled
@@ -194,31 +248,22 @@ def rate(db, config, stimuli_idx):
     show rating screen for one specific stimuli
     """
     stimuli_idx = int(stimuli_idx)
-
     user_id, playlist_idx = get_user_id_playlist(db, config)
-
-    session_state = int(request.get_cookie("session_state"))
     stimuli_done = int(request.get_cookie("stimuli_done"))
+    
+    if not stimuli_idx == stimuli_done or rating_already_exists(db, user_id, stimuli_idx):
+        stimuli_done = int(request.get_cookie("stimuli_done"))
+        if stimuli_done == stimuli_idx:
+            stimuli_done += 1
+        lWarn(f"Requested stimuli index {stimuli_idx} is unexpected or exists already, using stimuli_done {stimuli_done} instead.")
+        redirect('/rate/' + str(stimuli_done))
+
+    training = int(request.get_cookie("training", "0"))
 
     # Select correct playlist for lookup
-    if int(request.get_cookie("training")):
+    playlist = "playlist"
+    if training:
         playlist = "trainingsplaylist"
-    else:
-        playlist = "playlist"
-
-    # Check if video should be played or was already watched
-    if stimuli_idx == session_state:
-        play_video = 1
-    else:
-        play_video = 0
-
-    # play video only on first visit
-    if play_video == 1:
-        # play(config, stimuli_idx, playlist)  # the play call (via the play route) is moved to the rating template
-        # play just one time
-        play_video = 0
-        session_state = session_state + 1
-        response.set_cookie("session_state", str(session_state), path="/")
 
     return template(
         config["template_folder"] + "/rate.tpl",
@@ -289,8 +334,6 @@ def save_rating(db, config):
     timestamp = create_timestamp()
 
     user_id = int(request.get_cookie("user_id"))
-    stimuli_done = int(request.get_cookie("stimuli_done")) + 1
-    response.set_cookie("stimuli_done", str(stimuli_done), path="/")
 
     # get POST data ratings and write to DB
     request_data_pairs = {}
@@ -302,20 +345,28 @@ def save_rating(db, config):
     excluded = ["stimuli_idx", "stimuli_file"]
 
     db.execute('CREATE TABLE IF NOT EXISTS ratings (user_ID INTEGER, stimuli_ID TEXT, stimuli_file TEXT, rating_type TEXT, rating TEXT, timestamp TEXT);')
-
     for item in filter(lambda x: x not in excluded , request_data_pairs):
         db.execute(
             'INSERT INTO ratings VALUES (?,?,?,?,?,?);',
             (user_id, stimuli_ID, stimuli_file, item, request_data_pairs[item], timestamp)
         )
-
     db.commit()
+
+    stimuli_done = int(request.get_cookie("stimuli_done"))
+    lInfo(f"Saved Rating (UID: {user_id} SID: {stimuli_ID} TS: {timestamp} Stimuli File: {stimuli_file} Stimuli Done (Prev): {stimuli_done}")
+
+    if check_all_ratings_complete(db, user_id, stimuli_done, [str(p) for p in config["playlist"]]):
+        stimuli_done += 1
+    else:
+        lWarn(f"Not all previous ratings complete for user {user_id}, stimuli {stimuli_idx} (REPEATING STIMULI)")
+
+    response.set_cookie("stimuli_done", str(stimuli_done), path="/")
+    lInfo(f"Updated STIMULI DONE: {stimuli_done}") 
 
     if stimuli_done >= len(config["playlist"]):
         redirect('/finish')
 
     redirect('/rate/' + str(stimuli_done))
-
 
 
 @route('/static/<filename:path>',name='static')  # access the stylesheets and static files (JS files,...)
@@ -367,6 +418,7 @@ def reset_cookies(db, config):
         response.set_cookie(cookie, '', expires=0)
     redirect('/')
 
+
 @route('/dev')
 def dev(db, config):
     """
@@ -400,7 +452,7 @@ def get_and_check_playlist(playlistfilename):
                     lError("'{}' is not a valid videofile, please check your playlistfile".format(normalized_video_path))
                     sys.exit(-1)
             playlist.append(videos)
-        print("\n".join(map(str, playlist)))
+        lInfo("\n".join(map(str, playlist)))
         return playlist
     return -1
 
