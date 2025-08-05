@@ -70,7 +70,7 @@ def play(db, config, stimuli_idx):
 
 
     user_id, playlist_idx = get_user_id_playlist(db, config)
-    training = int(request.get_cookie("training", "0"))
+    training = not request.get_cookie("training_state") == "done"
     if training:
         stimuli_file = config["trainingsplaylist"][stimuli_idx]
     else:
@@ -106,13 +106,22 @@ def play(db, config, stimuli_idx):
     shell_call(config["player"].format(filename=stimuli_file))
 
 
-
 def get_user_id_playlist(db, config):
     if request.get_cookie("user_id"):
         user_id = int(request.get_cookie("user_id"))
         playlist = json.loads(db.execute('SELECT playlist from user_playlist where user_ID==? ;', (user_id,)).fetchone()[0])
         return user_id, playlist
     """ read user id from database """
+    if config.get("manual_user_id") is not None:
+        user_id = int(config["manual_user_id"])
+        response.set_cookie("user_id", str(user_id), path="/")
+        try:
+            playlist = json.loads(db.execute('SELECT playlist from user_playlist where user_ID==? ;', (user_id,)).fetchone()[0])
+            return user_id, playlist
+        except Exception as e:
+            lError(f"Error loading playlist for user ID {user_id}: {e}")
+            exit(1)
+
     if not db.execute("SELECT * FROM sqlite_master WHERE type='table' AND name='ratings'").fetchone():
         user_id = 1 # if ratings table does not exist: first user_id = 1
     else:
@@ -173,6 +182,16 @@ def check_all_ratings_complete(db, user_id, current_stimuli_idx, playlist, playl
     
     return all_ratings_complete
 
+def user_has_existing_ratings(db, user_id):
+    """
+    checks if the user has existing ratings in the database (excluding user_registered entries)
+    """
+    cursor = db.execute(
+        'SELECT COUNT(*) FROM ratings WHERE user_ID = ? AND rating_type != ?',
+        (user_id, "user_registered")
+    )
+    count = cursor.fetchone()[0]
+    return count > 0
 
 @route('/')  # Welcome screen
 @auth_basic(check_credentials)
@@ -192,6 +211,8 @@ def welcome(db, config):
         if not request.get_cookie("training_state") == "done": # Cookie that controls if training was already done or is still open
             response.set_cookie("training_state","open", path="/")
             response.set_cookie("training", "1", path="/")
+    else:
+        response.set_cookie("training_state","done", path="/")
 
     return template(
         config["template_folder"] + "/welcome.tpl",
@@ -265,8 +286,7 @@ def rate(db, config, stimuli_idx):
         lWarn(f"Requested stimuli index {stimuli_idx} is unexpected or exists already, using stimuli_done {stimuli_done} instead.")
         redirect('/rate/' + str(stimuli_done))
 
-    training = int(request.get_cookie("training", "0"))
-
+    training = not request.get_cookie("training_state") == "done"
     # Select correct playlist for lookup
     playlist = "playlist"
     if training:
@@ -288,10 +308,15 @@ def rate(db, config, stimuli_idx):
 
 @route('/questionnaire')
 @auth_basic(check_credentials)
-def questionnaire(config):
+def questionnaire(db, config):
     """
     show questionnaire if required
     """
+    if user_has_existing_ratings(db, int(request.get_cookie("user_id"))):
+        lWarn("User already has ratings, skipping questionnaire and training")
+        response.set_cookie("training_state", "done", path="/")
+        return redirect('/rate/0')
+
     if not config.get("questionnaire", True):
         if int(request.get_cookie("training")) > 0:
             redirect('/training/0')
@@ -474,17 +499,18 @@ def main(params=[]):
     parser.add_argument('-configfilename', type=str, default="config.json", help='configuration file name')
     parser.add_argument('--standalone', action='store_true', help="run as standalone version")
     parser.add_argument('--development', '-d', action='store_true', help="run in dev mode")
+    parser.add_argument('--user_id', type=str, default=None, help="Manually set user ID for ratings")
 
     argsdict = vars(parser.parse_args())
-    lInfo("read config {}".format(argsdict["configfilename"]))
+    lInfo("Read config {}".format(argsdict["configfilename"]))
     # read config file
     try:
         config = json.loads(read_file(os.path.dirname(os.path.realpath(__file__)) + "/" + argsdict["configfilename"]))
     except Exception as e:
-        lError("configuration file 'config.json' is corrupt (not json conform). Error: " + str(e))
+        lError("Configuration file 'config.json' is corrupt (not json conform). Error: " + str(e))
         return 1
     config["development"] = argsdict["development"]
-    lInfo("read playlist {}".format(config["playlist"]))
+    lInfo("Read playlist {}".format(config["playlist"]))
 
     config["playlist"] = get_and_check_playlist(config["playlist"])
 
@@ -504,6 +530,10 @@ def main(params=[]):
         # open (default) web browser
         webbrowser.open("http://127.0.0.1:{port}/".format(port=config["http_port"]), new=1, autoraise=True)
         return
+
+    if argsdict["user_id"] is not None:
+        config["manual_user_id"] = argsdict["user_id"]
+        lInfo(f"Manually set user ID: {argsdict['user_id']}")
 
     # default case: run in server mode
     server(config, host='0.0.0.0')
