@@ -66,15 +66,14 @@ def play(db, config, stimuli_idx):
     play a given media file by its index inside the playlist
     """
     stimuli_idx = int(stimuli_idx)
-    lInfo(f"Play Stimuli {stimuli_idx}")
-
-
     user_id, playlist_idx = get_user_id_playlist(db, config)
     training = not request.get_cookie("training_state") == "done"
     if training:
         stimuli_file = config["trainingsplaylist"][stimuli_idx]
     else:
         stimuli_file = config["playlist"][playlist_idx[stimuli_idx]]
+
+    lInfo(f"Play Stimuli {stimuli_idx} ({'train' if training else 'test'}) for user {user_id}: {stimuli_file}")
 
     if config.get("no_media_playback", False):
         return
@@ -83,9 +82,8 @@ def play(db, config, stimuli_idx):
 
     # used to avoid false positives from training/playback or duplicate videos in the playlist
     video_identifier = f"U{user_id}_S{stimuli_idx}_{'train' if training else 'test'}" 
-    lInfo(f"Videos already shown: {videos_shown}")
     if video_identifier in videos_shown:
-        lWarn(f"Video {stimuli_file} already shown, skipping playback.")
+        lWarn(f"Video {stimuli_file} ({video_identifier}) already shown, skipping playback.")
         return
 
     def q(x):
@@ -98,7 +96,6 @@ def play(db, config, stimuli_idx):
 
     stimuli_file = " ".join(map(q, stimuli_file))
 
-    lInfo(f"Play Stimuli: {stimuli_file}")
     if "gray_video" in config:
         stimuli_file = q(config["gray_video"]) + " " + stimuli_file + " " + q(config["gray_video"])
         lInfo(f"Use gray video before and after: {stimuli_file}")
@@ -172,9 +169,7 @@ def check_all_ratings_complete(db, user_id, current_stimuli_idx, playlist, playl
     all_ratings_complete = expected_files.issubset(rated_files)
 
     if all_ratings_complete:
-        lInfo(f"All ratings complete for user {user_id} up to stimuli index {current_stimuli_idx}\n" +
-              f"Expected Files:\t{expected_files}\n" +
-              f"Rated Files:\t{rated_files}")
+        lInfo(f"All ratings complete for user {user_id} up to stimuli index {current_stimuli_idx}")
     else:
         lWarn(f"Not all ratings complete for user {user_id} up to stimuli index {current_stimuli_idx}\n" +
               f"Expected Files:\t{expected_files}\n" +
@@ -378,14 +373,23 @@ def save_rating(db, config):
 
     db.execute('CREATE TABLE IF NOT EXISTS ratings (user_ID INTEGER, stimuli_ID TEXT, stimuli_file TEXT, rating_type TEXT, rating TEXT, timestamp TEXT);')
     for item in filter(lambda x: x not in excluded , request_data_pairs):
-        db.execute(
-            'INSERT INTO ratings VALUES (?,?,?,?,?,?);',
-            (user_id, stimuli_ID, stimuli_file, item, request_data_pairs[item], timestamp)
-        )
+        # Check for duplicates
+        existing = db.execute('SELECT 1 FROM ratings WHERE user_ID=? AND stimuli_ID=? AND stimuli_file=? AND rating_type=?',
+                              (user_id, stimuli_ID, stimuli_file, item)).fetchone()
+
+        if existing:
+            lError(f"Duplicate rating detected for user {user_id}, stimuli {stimuli_ID}, file {stimuli_file}, type {item}. Skipping insertion.")
+            lError(f"Existing entry: {existing}")
+            lError(f"New entry:      {(user_id, stimuli_ID, stimuli_file, item, request_data_pairs[item], timestamp)}")
+        else:
+            db.execute(
+                'INSERT INTO ratings VALUES (?,?,?,?,?,?);',
+                (user_id, stimuli_ID, stimuli_file, item, request_data_pairs[item], timestamp)
+            )
     db.commit()
 
     stimuli_done = int(request.get_cookie("stimuli_done"))
-    lInfo(f"Saved Rating (UID: {user_id} SID: {stimuli_ID} TS: {timestamp} Stimuli File: {stimuli_file} Stimuli Done (Prev): {stimuli_done}")
+    lInfo(f"Saved Rating (UID: {user_id} / SID: {stimuli_ID} / Stimuli Done (Prev): {stimuli_done} / Data: {request_data_pairs})")
 
     user_id, playlist_idx = get_user_id_playlist(db, config)
     if check_all_ratings_complete(db, user_id, stimuli_done, config["playlist"], playlist_idx):
@@ -394,7 +398,6 @@ def save_rating(db, config):
         lWarn(f"Not all previous ratings complete for user {user_id}, stimuli {stimuli_idx} (REPEATING STIMULI)")
 
     response.set_cookie("stimuli_done", str(stimuli_done), path="/")
-    lInfo(f"Updated STIMULI DONE: {stimuli_done}") 
 
     if stimuli_done >= len(config["playlist"]):
         redirect('/finish')
