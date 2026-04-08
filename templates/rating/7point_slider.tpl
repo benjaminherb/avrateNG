@@ -115,7 +115,7 @@
     </style>
 
     <div style="margin-bottom:2em; margin-top:1em">
-    Rating: <input type="number" id="label_range_7point_slider" style="width:5em" onchange="update_slider(this, 'range_7point_slider')" required>
+    Rating: <input type="number" id="label_range_7point_slider" name="label_range_7point_slider" style="width:5em" min="1" max="7" step="0.07" onchange="update_slider(this, 'range_7point_slider')" required>
     </div>
     % include('templates/rating/common.tpl', stimuli_file=stimuli_file)
 
