@@ -10,12 +10,7 @@
 questions = [
     {'type': 'choice', 'question': 'What is your age?', 'qkey': 'user_age_range', 'options': ['', '< 18', '18 to 24', '25 to 29', '30 to 39', '40 to 49', '50 to 59', '60 to 69', '70+']},
     {'type': 'choice', 'question': 'What is your gender?', 'qkey': 'user_gender', 'options': ['', 'Male', 'Female', 'Diverse', 'Rather not say']},
-    {'type': 'sep'},
     {'type': 'choice', 'question': 'Do you have experiences in perception tests?', 'qkey': 'user_perception_tests', 'options': ['', 'Yes', 'No']},
-    {'type': 'choice', 'question': 'How good is your vision?', 'qkey': 'user_eye_quality', 'options': ['', 'Excellent', 'Good', 'Fair', 'Poor', 'Bad', 'Hard']},
-    {'type': 'choice', 'question': 'Which option best describes your environment?', 'qkey': 'user_room_quality', 'options': ['', 'Alone in a Quiet Room', 'Some Noise and Distractions', 'Significant Noise and Distractions']},
-    {'type': 'choice', 'question': 'What type of device are you now using?', 'qkey': 'user_computer_type', 'options': ['', 'Phone', 'Tablet', 'Laptop', 'Desktop']},
-    {'type': 'input', 'question': 'How did you got informed about this test?', 'qkey': 'user_test_origin'}
 ]
 %>
   <hr>
